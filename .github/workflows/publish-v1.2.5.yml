@@ -1,0 +1,81 @@
+name: Publish v1.2.5
+
+on:
+  push:
+    branches: [release/v1.2.5]
+    paths: [.github/workflows/publish-v1.2.5.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_SHA: 3924af98cc41f2b24fed52123e705fdcf5e1a876
+      VALIDATION_SHA: 3924af98cc41f2b24fed52123e705fdcf5e1a876
+      RELEASE_TAG: v1.2.5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+      - name: Verify exact release SHA
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run validate
+      - run: npm run smoke:extension
+      - run: npm run package
+      - name: Verify release artifacts
+        run: |
+          (cd artifacts && sha256sum -c SHA256SUMS.txt)
+          unzip -t artifacts/chat-turn-guardian-1.2.5.zip
+          test "$(unzip -Z1 artifacts/chat-turn-guardian-1.2.5.zip | grep -c '^manifest.json$')" -eq 1
+          test "$(unzip -Z1 artifacts/chat-turn-guardian-1.2.5.zip | grep -Ec '\.(ts|map)$|(^|/)\.env($|\.)')" -eq 0
+          node -e 'const fs = require("node:fs"); const info = JSON.parse(fs.readFileSync("artifacts/build-info.json", "utf8")); if (info.sourceSha !== process.env.RELEASE_SHA) throw new Error(`build-info sourceSha mismatch: ${info.sourceSha} != ${process.env.RELEASE_SHA}`); if (info.fileCount !== 53) throw new Error(`unexpected fileCount ${info.fileCount}`);'
+      - name: Refuse duplicate tag or release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+      - name: Write release notes
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## Chat Turn Guardian v1.2.5
+
+          - Fixes hidden/background-tab status reading when Chromium leaves layout-derived `innerText` stale even though the completed assistant response is already present in the conversation DOM.
+          - Recovers a terminal `CHAT_TURN_GUARDIAN_STATUS_V1` marker from background-safe structural DOM evidence only on the latest assistant turn and never from `pre`/`code`.
+          - Verifies the exact Guardian-owned user turn in hidden tabs from structural DOM evidence while preserving conversation/route identity, DOM ordering, trusted-human-state precedence, fail-closed ambiguity handling, and no blind retry.
+          - Keeps visible/foreground-tab rendered-text behavior unchanged.
+          - Includes focused regression coverage for hidden-tab `HOLD_HUMAN_OPERATION`, exact user-turn verification, code-block rejection, and visible-tab behavior.
+
+          Chrome Web Store publication remains deferred.
+          EOF
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            artifacts/chat-turn-guardian-1.2.5.zip \
+            artifacts/SHA256SUMS.txt \
+            artifacts/build-info.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_SHA" \
+            --title "Chat Turn Guardian v1.2.5" \
+            --notes-file release-notes.md
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,name,isDraft,isPrerelease,targetCommitish,url,assets

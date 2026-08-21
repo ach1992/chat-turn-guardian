@@ -1,0 +1,74 @@
+name: Verify published v1.2.5
+
+on:
+  push:
+    branches: [release/v1.2.5]
+    paths: [.github/workflows/verify-published-v1.2.5.yml]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: v1.2.5
+      RELEASE_SHA: 3924af98cc41f2b24fed52123e705fdcf5e1a876
+      PR_NUMBER: "69"
+    steps:
+      - name: Wait for and verify GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          found=false
+          for attempt in $(seq 1 36); do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              found=true
+              break
+            fi
+            sleep 5
+          done
+          test "$found" = true
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,name,isDraft,isPrerelease,targetCommitish,url,assets > release.json
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .tagName == $tag and
+            .name == "Chat Turn Guardian v1.2.5" and
+            .isDraft == false and
+            .isPrerelease == false and
+            .targetCommitish == $sha and
+            ([.assets[].name] | sort) == (["SHA256SUMS.txt", "build-info.json", "chat-turn-guardian-1.2.5.zip"] | sort)
+          ' release.json >/dev/null
+      - name: Verify published assets and provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir published
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir published
+          (cd published && sha256sum -c SHA256SUMS.txt)
+          unzip -t published/chat-turn-guardian-1.2.5.zip >/dev/null
+          test "$(unzip -Z1 published/chat-turn-guardian-1.2.5.zip | wc -l)" -eq 53
+          test "$(unzip -Z1 published/chat-turn-guardian-1.2.5.zip | grep -c '^manifest.json$')" -eq 1
+          test "$(unzip -Z1 published/chat-turn-guardian-1.2.5.zip | grep -Ec '\.(ts|map)$|(^|/)\.env($|\.)')" -eq 0
+          node -e 'const fs=require("node:fs"); const info=JSON.parse(fs.readFileSync("published/build-info.json","utf8")); if(info.version!=="1.2.5"||info.sourceSha!==process.env.RELEASE_SHA||info.fileCount!==53) process.exit(1);'
+          sha256sum published/chat-turn-guardian-1.2.5.zip | awk '{print $1}' > zip-sha.txt
+      - name: Record publication evidence on release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(jq -r '.url' release.json)
+          zip_sha=$(cat zip-sha.txt)
+          cat > evidence.md <<EOF
+          v1.2.5 publication verified.
+
+          - Release: $url
+          - Final source SHA: \`$RELEASE_SHA\`
+          - Release is draft: false
+          - Release is prerelease: false
+          - Assets: \`chat-turn-guardian-1.2.5.zip\`, \`SHA256SUMS.txt\`, \`build-info.json\`
+          - Published ZIP files: 53
+          - Published ZIP SHA-256: \`$zip_sha\`
+          - Published checksum, ZIP integrity, manifest root, source exclusion, and build-info provenance: verified
+          - Chrome Web Store publication: deferred
+          EOF
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$(cat evidence.md)" >/dev/null
